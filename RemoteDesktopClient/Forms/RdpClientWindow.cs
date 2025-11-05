@@ -51,9 +51,26 @@ namespace MultiRemoteDesktopClient
 
             this._sd = sd;
 
+            // Log connection attempt details
+            Console.WriteLine("=== RDP Connection Initialization ===");
+            Console.WriteLine($"Server: {sd.Server}");
+            Console.WriteLine($"Username: {sd.Username}");
+            Console.WriteLine($"Domain: {sd.Domain ?? "(none)"}");
+            Console.WriteLine($"Password Length: {sd.Password?.Length ?? 0}");
+            Console.WriteLine($"Port: {sd.Port}");
+
             rdpClient.Server = sd.Server;
+
+            // Set domain and username separately
+            if (!string.IsNullOrEmpty(sd.Domain))
+            {
+                rdpClient.Domain = sd.Domain;
+                Console.WriteLine($"Domain set to: {sd.Domain}");
+            }
+
             rdpClient.UserName = sd.Username;
-            //rdpClient.Domain = sd.dom
+            Console.WriteLine($"Username set to: {sd.Username}");
+
             rdpClient.AdvancedSettings2.ClearTextPassword = sd.Password;
             rdpClient.ColorDepth = sd.ColorDepth;
             rdpClient.DesktopWidth = sd.DesktopWidth;
@@ -77,6 +94,40 @@ namespace MultiRemoteDesktopClient
             //rdpClient.AdvancedSettings2.BitmapCacheSize = 512;
             rdpClient.AdvancedSettings2.CachePersistenceActive = -1;
 
+            // Match RDCMan settings exactly:
+            // - "Warn if authentication fails" = CHECKED (AuthenticationLevel = 1)
+            // - "Enable CredSSP support" = NOT CHECKED (EnableCredSspSupport = false)
+            try
+            {
+                // Cast to AdvancedSettings5 or higher to access EnableCredSspSupport
+                var advancedSettings5 = rdpClient.AdvancedSettings2 as dynamic;
+                if (advancedSettings5 != null)
+                {
+                    advancedSettings5.AuthenticationLevel = 2; // Set to 2 (connect and don't warn if authentication fails)
+                    advancedSettings5.EnableCredSspSupport = false;  // Disable CredSSP like RDCMan
+
+                    // Add more settings that might help with error 516
+                    // These settings can help prevent internal errors related to control initialization
+                    advancedSettings5.EnableAutoReconnect = true;
+                    advancedSettings5.MaxReconnectAttempts = 3;
+
+                    // Try setting NegotiateSecurityLayer - important for non-CredSSP connections
+                    advancedSettings5.NegotiateSecurityLayer = true;
+
+                    // Allow connection even if authentication fails at client
+                    advancedSettings5.AllowBackgroundInput = 0;
+
+                    Console.WriteLine("Authentication Level: 2 (Connect and don't warn if authentication fails)");
+                    Console.WriteLine("CredSSP Support Enabled: False");
+                    Console.WriteLine("EnableAutoReconnect: True");
+                    Console.WriteLine("NegotiateSecurityLayer: True");
+                    Console.WriteLine("AllowBackgroundInput: 0");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Warning: Could not configure authentication: " + ex.Message);
+            }
 
             // custom port
             if (sd.Port != 0)
@@ -108,6 +159,8 @@ namespace MultiRemoteDesktopClient
             this.rdpClient.OnConnected += new EventHandler(rdpClient_OnConnected);
             this.rdpClient.OnLoginComplete += new EventHandler(rdpClient_OnLoginComplete);
             this.rdpClient.OnDisconnected += new AxMSTSCLib.IMsTscAxEvents_OnDisconnectedEventHandler(rdpClient_OnDisconnected);
+            this.rdpClient.OnWarning += new AxMSTSCLib.IMsTscAxEvents_OnWarningEventHandler(rdpClient_OnWarning);
+            this.rdpClient.OnFatalError += new AxMSTSCLib.IMsTscAxEvents_OnFatalErrorEventHandler(rdpClient_OnFatalError);
 
             btnSndKey_TaskManager.Click += new EventHandler(SendKeys_Button_Click);
 
@@ -177,8 +230,26 @@ namespace MultiRemoteDesktopClient
             btnConnect.Enabled = true;
             btnDisconnect.Enabled = false;
 
-            { // check connection status on output
-                System.Diagnostics.Debug.WriteLine("OnDisconnected " + rdpClient.Connected);
+            // Log disconnect reason
+            Console.WriteLine("=== RDP Disconnected ===");
+            Console.WriteLine($"OnDisconnected - Connected Status: {rdpClient.Connected}");
+            Console.WriteLine($"Disconnect Reason Code: {e.discReason}");
+
+            // Decode disconnect reason
+            string reasonText = GetDisconnectReason(e.discReason);
+            Console.WriteLine($"Disconnect Reason: {reasonText}");
+
+            // Show message box for authentication failures
+            if (e.discReason == 2308 || e.discReason == 264 || e.discReason == 1286 || e.discReason == 2055)
+            {
+                MessageBox.Show($"Connection failed: {reasonText}\n\nReason Code: {e.discReason}\n\nServer: {this._sd.Server}\nUsername: {this._sd.Username}\nDomain: {this._sd.Domain ?? "(none)"}",
+                    "Authentication Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            // Show info for error 516 (internal error)
+            else if (e.discReason == 516)
+            {
+                MessageBox.Show($"Connection failed with internal error.\n\nThis may be caused by:\n- Incompatible security settings\n- Display/resolution configuration issues\n- Server policy restrictions\n\nReason Code: {e.discReason}\n\nServer: {this._sd.Server}\nUsername: {this._sd.Username}\nDomain: {this._sd.Domain ?? "(none)"}\n\nTry checking the console output for more details.",
+                    "Internal RDP Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
 
             if (Disconnected != null)
@@ -187,12 +258,41 @@ namespace MultiRemoteDesktopClient
             }
         }
 
+        private string GetDisconnectReason(int reason)
+        {
+            // Common RDP disconnect reason codes
+            switch (reason)
+            {
+                case 0: return "No error";
+                case 1: return "Local disconnection";
+                case 2: return "Remote disconnection by user";
+                case 3: return "Remote disconnection by server / User initiated disconnect";
+                case 260: return "DNS name lookup failure";
+                case 262: return "Out of memory";
+                case 264: return "Connection timed out";
+                case 516: return "Internal error";
+                case 518: return "Out of memory";
+                case 520: return "Host not found";
+                case 772: return "Winsock error";
+                case 1030: return "Security error";
+                case 1032: return "Encryption error";
+                case 1286: return "License protocol error";
+                case 2308: return "The specified computer name contains invalid characters";
+                case 2055: return "Internal security error";
+                case 2056: return "Internal security error";
+                case 2822: return "Logon failure: unknown username or bad password";
+                case 2825: return "Account restriction prevents logon";
+                case 3079: return "Connection to remote PC lost";
+                default: return $"Unknown disconnect reason (code: {reason})";
+            }
+        }
+
         void rdpClient_OnLoginComplete(object sender, EventArgs e)
         {
             Status("Loged in using " + this._sd.Username + " user account");
 
             { // check connection status on output
-                System.Diagnostics.Debug.WriteLine("OnLoginComplete " + rdpClient.Connected);
+                Console.WriteLine("OnLoginComplete - Connected Status: " + rdpClient.Connected);
             }
 
             if (LoginComplete != null)
@@ -206,7 +306,7 @@ namespace MultiRemoteDesktopClient
             Status("Connected to " + this._sd.Server);
 
             { // check connection status on output
-                System.Diagnostics.Debug.WriteLine("OnConnected " + rdpClient.Connected);
+                Console.WriteLine("OnConnected - Connected Status: " + rdpClient.Connected);
             }
 
             if (Connected != null)
@@ -223,12 +323,57 @@ namespace MultiRemoteDesktopClient
             btnDisconnect.Enabled = true;
 
             { // check connection status on output
-                System.Diagnostics.Debug.WriteLine("OnConnecting " + rdpClient.Connected);
+                Console.WriteLine("OnConnecting - Connected Status: " + rdpClient.Connected);
             }
 
             if (Connecting != null)
             {
                 Connecting(this, e, this._listIndex);
+            }
+        }
+
+        void rdpClient_OnWarning(object sender, AxMSTSCLib.IMsTscAxEvents_OnWarningEvent e)
+        {
+            Console.WriteLine("=== RDP Warning ===");
+            Console.WriteLine($"Warning Code: {e.warningCode}");
+
+            string warningText = GetWarningDescription(e.warningCode);
+            Console.WriteLine($"Warning: {warningText}");
+        }
+
+        void rdpClient_OnFatalError(object sender, AxMSTSCLib.IMsTscAxEvents_OnFatalErrorEvent e)
+        {
+            Console.WriteLine("=== RDP Fatal Error ===");
+            Console.WriteLine($"Error Code: {e.errorCode}");
+
+            string errorText = GetErrorDescription(e.errorCode);
+            Console.WriteLine($"Fatal Error: {errorText}");
+
+            MessageBox.Show($"Fatal RDP Error: {errorText}\n\nError Code: {e.errorCode}\n\nServer: {this._sd.Server}\nUsername: {this._sd.Username}\nDomain: {this._sd.Domain ?? "(none)"}",
+                "Fatal Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+
+        private string GetWarningDescription(int warningCode)
+        {
+            switch (warningCode)
+            {
+                case 1: return "Certificate warning";
+                case 2: return "Certificate name mismatch";
+                case 3: return "Certificate expired";
+                default: return $"Unknown warning (code: {warningCode})";
+            }
+        }
+
+        private string GetErrorDescription(int errorCode)
+        {
+            switch (errorCode)
+            {
+                case 0: return "Internal error";
+                case 1: return "Protocol error";
+                case 2: return "Out of memory";
+                case 3: return "Control error";
+                case 4: return "Invalid parameter";
+                default: return $"Unknown error (code: {errorCode})";
             }
         }
 

@@ -27,7 +27,7 @@ namespace Database
         public void Initialize()
         {
             _db_name = ConfigurationManager.AppSettings["DatbaseFilepath"].ToString();
-            _db_name = System.IO.Path.Combine(System.Windows.Forms.Application.StartupPath, _db_name);
+            _db_name = System.IO.Path.Combine(AppContext.BaseDirectory, _db_name);
 
             _connectionString = ConfigurationManager.AppSettings["connection"].ToString();
             _connectionString = string.Format(_connectionString, _db_name);
